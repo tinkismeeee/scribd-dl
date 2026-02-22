@@ -13,9 +13,9 @@ class App {
         return App.instance
     }
 
-    async execute(url, flag) {
+    async execute(url) {
         if (url.match(scribdRegex.DOMAIN)) {
-            await scribdDownloader.execute(url, flag)
+            await scribdDownloader.execute(url)
         } else if (url.match(slideshareRegex.DOMAIN)) {
             await slideshareDownloader.execute(url)
         } else if (url.match(everandRegex.DOMAIN)) {

@@ -17,6 +17,7 @@ class DirectoryIo {
         fs.mkdirSync(dest, { recursive: true }, (err) => {
             if (err) throw err;
         })
+        return dest;
     }
 
     /**

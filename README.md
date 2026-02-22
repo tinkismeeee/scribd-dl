@@ -64,6 +64,9 @@ Edit `config.ini` to change rendering time or output details:
 [SCRIBD]
 rendertime=100
 
+[SLIDESHARE]
+rendertime=100
+
 [DIRECTORY]
 output=output
 filename=title
@@ -71,14 +74,14 @@ filename=title
 
 | Config | Description | Support |
 | --- | --- | --- |
-| `rendertime` | Wait time (ms) for page rendering | [scribd.com](https://www.scribd.com/) |
+| `rendertime` | Wait time (ms) for page rendering | [scribd.com](https://www.scribd.com/)<br/>[slideshare.net](https://www.slideshare.net/) |
 | `output` | Output folder | [scribd.com](https://www.scribd.com/)<br/>[slideshare.net](https://www.slideshare.net/)<br/>[everand.com](https://www.everand.com/podcasts) |
 | `filename` | Output filename<br/>`title`: filename = default filename / title<br/>(otherwise, filename = ID) | [scribd.com](https://www.scribd.com/)<br/>[slideshare.net](https://www.slideshare.net/) |
 
 ## Usage (CLI) ##
 
 ```console
-Usage: npm start [options] <url>
+Usage: npm start <url>
 ```
 
 Example:
@@ -92,6 +95,8 @@ Ensure you have the legal right and platform permission to download the referenc
 
 ## Support URL Format ##
 - https://www.scribd.com/doc/**
+- https://www.scribd.com/document/**
+- https://www.scribd.com/presentation/**
 - https://www.scribd.com/embeds/**
 - https://www.slideshare.net/**
 - https://www.slideshare.net/slideshow/**

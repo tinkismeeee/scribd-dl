@@ -13,8 +13,11 @@ import sanitize from "sanitize-filename";
 
 const output = configLoader.load("DIRECTORY", "output")
 const filename = configLoader.load("DIRECTORY", "filename")
+const rendertime = parseInt(configLoader.load("SLIDESHARE", "rendertime"))
 
 class SlideshareDownloader {
+    static progressBar = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
+
     constructor() {
         if (!SlideshareDownloader.instance) {
             SlideshareDownloader.instance = this
@@ -33,50 +36,53 @@ class SlideshareDownloader {
     }
 
     async slideshow(url, id) {
-        // prepare temp dir
-        const dir = `${output}/${id}`
-        await directoryIo.create(dir)
-
-        // navigate to slideshare
         const page = await puppeteerSg.getPage(url, true)
+        try {
+            const {title} = await this.processPage(page);
+            const identifier = `${sanitize(filename === "title" ? title : id)}`
+            const pdfPath = `${output}/${identifier}.pdf`
 
-        // wait rendering
-        await new Promise(resolve => setTimeout(resolve, 1000))
+            // get slides images
+            const srcs = await page.$$eval("img[id^='slide-image-']", imgs => imgs.map(img => img.src));
 
-        // get the title
-        const h1 = await page.$("h1.title")
-        const title = decodeURIComponent(await h1.evaluate((el) => el.textContent.trim()))
+            // iterate all images
+            const tempDir = await directoryIo.create(`${output}/${id}`)
+            const images = []
+            SlideshareDownloader.progressBar.start(srcs.length, 0);
+            for (let i = 0; i < srcs.length; i++) {
+                const imagePath = `${tempDir}/${(i + 1).toString().padStart(5, '0')}.png`
 
-        // get slides images
-        const srcs = await page.$$eval("img[id^='slide-image-']", imgs => imgs.map(img => img.src));
+                // convert the webp (even it shows jpg) to png
+                const resp = await axios.get(srcs[i], { responseType: 'arraybuffer' })
+                const imageBuffer = await sharp(resp.data).toFormat('png').toBuffer();
+                fs.writeFileSync(imagePath, Buffer.from(imageBuffer, 'binary'))
 
-        // iterate all images
-        const images = []
-        const bar = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
-        bar.start(srcs.length, 0);
-        for (let i = 0; i < srcs.length; i++) {
-            const src = srcs[i];
-            const path = `${dir}/${(i + 1).toString().padStart(5, '0')}.png`
-
-            // convert the webp (even it shows jpg) to png
-            const resp = await axios.get(src, { responseType: 'arraybuffer' })
-            const imageBuffer = await sharp(resp.data).toFormat('png').toBuffer();
-            fs.writeFileSync(path, Buffer.from(imageBuffer, 'binary'))
-
-            const metadata = await sharp(path).metadata();
-            images.push(new Image(path, metadata.width, metadata.height));
-            bar.update(i + 1);
+                const metadata = await sharp(imagePath).metadata();
+                images.push(new Image(imagePath, metadata.width, metadata.height));
+                SlideshareDownloader.progressBar.update(i + 1);
+            }
+            SlideshareDownloader.progressBar.update(srcs.length);
+            SlideshareDownloader.progressBar.stop();
+            await pdfGenerator.generate(images, pdfPath)
+            directoryIo.remove(`${tempDir}`)
+        } catch (err) {
+            throw err;
+        } finally {
+            await page.close()
+            await puppeteerSg.close()
         }
-        bar.stop();
+    }
+    
+    async processPage(page) {
+        console.log(`Processing page...`)
+        return await page.evaluate(async (rendertime) => {
+            await window.__helpers__.lazyLoad(null, rendertime);
 
-        // generate pdf
-        await pdfGenerator.generate(images, `${output}/${sanitize(filename == "title" ? title : id)}.pdf`)
+            const h1 = document.querySelector("h1.title");
+            const title = decodeURIComponent(h1.textContent.trim());
 
-        // remove temp dir
-        directoryIo.remove(`${dir}`)
-
-        await page.close()
-        await puppeteerSg.close()
+            return { title: title };
+        }, rendertime);
     }
 }
 

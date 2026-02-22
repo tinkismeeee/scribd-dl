@@ -1,23 +1,7 @@
 import { app } from './src/App.js'
-import * as scribdFlag  from './src/const/ScribdFlag.js'
 
-const flags = [scribdFlag.DEFAULT, scribdFlag.IMAGE]
-
-if (process.argv.length >= 3) {
-    let url;
-    let flag;
-    for (let i = 2; i < process.argv.length; i++) {
-        if (flags.includes(process.argv[i])) {
-            flag = process.argv[i]
-        } else {
-            url = process.argv[i]
-        }
-    }
-    await app.execute(url, flag)
+if (process.argv.length === 3) {
+    await app.execute(process.argv[2])
 } else {
-    console.error(`
-Usage: npm start [options] url
-Options:  
-  /i        image-based: rendering using page snapshots (for authorized content only)
-    `)
+    console.error(`Usage: npm start <url>`)
 }

@@ -1,16 +1,10 @@
 import cliProgress from "cli-progress"
-import { puppeteerSg } from "../utils/request/PuppeteerSg.js";
-import { pdfGenerator } from "../utils/io/PdfGenerator.js";
+import sanitize from "sanitize-filename";
 import { configLoader } from "../utils/io/ConfigLoader.js";
 import { directoryIo } from "../utils/io/DirectoryIo.js"
+import { pdfGenerator } from "../utils/io/PdfGenerator.js";
+import { puppeteerSg } from "../utils/request/PuppeteerSg.js";
 import * as scribdRegex from "../const/ScribdRegex.js"
-import * as scribdFlag  from '../const/ScribdFlag.js'
-import { Image } from "../object/Image.js"
-import sharp from "sharp";
-import path from 'path'
-import sanitize from "sanitize-filename";
-import { PDFDocument } from 'pdf-lib';
-import fs from 'fs/promises';
 
 
 const output = configLoader.load("DIRECTORY", "output")
@@ -18,6 +12,8 @@ const filename = configLoader.load("DIRECTORY", "filename")
 const rendertime = parseInt(configLoader.load("SCRIBD", "rendertime"))
 
 class ScribdDownloader {
+    static progressBar = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
+
     constructor() {
         if (!ScribdDownloader.instance) {
             ScribdDownloader.instance = this
@@ -25,15 +21,8 @@ class ScribdDownloader {
         return ScribdDownloader.instance
     }
 
-    async execute(url, flag) {
-        let fn;
-        if (flag === scribdFlag.IMAGE) {
-            console.log(`Mode: IMAGE`)
-            fn = this.embedsImage
-        } else {
-            console.log(`Mode: DEFAULT`)
-            fn = this.embedsDefault
-        }
+    async execute(url) {
+        let fn = this.embedsDefault.bind(this)
         if (url.match(scribdRegex.DOCUMENT)) {
             await fn(`https://www.scribd.com/embeds/${scribdRegex.DOCUMENT.exec(url)[2]}/content`)
         } else if (url.match(scribdRegex.EMBED)) {
@@ -43,215 +32,136 @@ class ScribdDownloader {
         }
     }
 
+    /**
+     * Generate PDF by directly printing the pages
+     */
     async embedsDefault(url) {
         const m = scribdRegex.EMBED.exec(url)
-        if (m) {
-            let id = m[1]
-
-            // navigate to scribd
-            let page = await puppeteerSg.getPage(url)
-
-            // wait rendering
-            await new Promise(resolve => setTimeout(resolve, 1000))
-
-            // get the title
-            let overlaySelector = await page.$("div.mobile_overlay a")
-            let title = decodeURIComponent(await overlaySelector.evaluate((el) => el.href.split('/').pop().trim()))
-
-            // prepare identifier
-            let identifier = `${sanitize(filename == "title" ? title : id)}`
-
-            // remove cookie consent dialogs
-            const cookieSelectors = ["div.customOptInDialog", "div[aria-label='Cookie Consent Banner']"];
-            for (const selector of cookieSelectors) {
-                const elements = await page.$$(selector);
-                for (const el of elements) {
-                    await el.evaluate(node => node.remove());
-                }
+        if (!m) {
+            throw new Error(`Unsupported URL: ${url}`)
+        }
+        const id = m[1]
+        const page = await puppeteerSg.getPage(url)
+        try {
+            const {title, pages} = await this.processPage(page);
+            const identifier = `${sanitize(filename === "title" ? title : id)}`
+            const pdfPath = `${output}/${identifier}.pdf`
+            if (pages.every(p => p.width === pages[0].width && p.height === pages[0].height)) {
+                await puppeteerSg.generatePDF(page, pdfPath, {
+                    width: pages[0].width,
+                    height: pages[0].height
+                })
+            } else {
+                const tempDir = `${output}/${identifier}_temp`
+                const groups = await this.groupPagesByDimensions(pages)
+                const pdfPaths = await this.generatePDFs(page, groups, tempDir);
+                await pdfGenerator.merge(pdfPaths, pdfPath);
+                directoryIo.remove(tempDir)
             }
+            console.log(`Generated: ${pdfPath}`);
+        } catch (err) {
+            throw err;
+        } finally {
+            await page.close()
+            await puppeteerSg.close()
+        }
+    }
+
+    /**
+     * Process the page to get title and page dimensions, and clean up unnecessary elements
+     */
+    async processPage(page) {
+        console.log(`Processing page...`)
+        return await page.evaluate(async (rendertime) => {
+            ["div.customOptInDialog", "div[aria-label='Cookie Consent Banner']"].forEach(sel => {
+                window.__helpers__.removeSelectorAll(sel);
+            });
+            await window.__helpers__.lazyLoad('div.document_scroller', rendertime);
+
+            window.__helpers__.removeMarginSelectorAll("div.outer_page_container div[id^='outer_page_']");
             
-            // prepare progress bar
-            const progressBar = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
+            const overlay = document.querySelector("div.mobile_overlay a");
+            const title = overlay ? decodeURIComponent(overlay.href.split('/').pop().trim()) : null;
+            const pages = [];
+            document.querySelectorAll("div.outer_page_container div[id^='outer_page_']").forEach(dom => {
+                const style = getComputedStyle(dom);
+                pages.push({
+                    id: dom.id,
+                    width: parseInt(style.width),
+                    height: parseInt(style.height)
+                })
+            });
+            document.body.innerHTML = document.querySelector("div.outer_page_container").innerHTML
+            return { title: title, pages: pages };
+        }, rendertime);
+    }
 
-            // scroll to load all pages
-            console.log(`Load pages...`)
-            await page.click('div.document_scroller');
-            const containerSelector = await page.$('div.document_scroller');
-            const scrollHeight = await containerSelector.evaluate(el => el.scrollHeight);
-            const clientHeight = await containerSelector.evaluate(el => el.clientHeight);
-            progressBar.start(scrollHeight, 0);
-            let scrollTop = await containerSelector.evaluate(el => el.scrollTop);
-            while (scrollTop + clientHeight < scrollHeight) {
-                await page.keyboard.press('PageDown');
-                await new Promise(resolve => setTimeout(resolve, rendertime))
-                scrollTop = await containerSelector.evaluate(el => el.scrollTop);
-                progressBar.update(Math.round(scrollTop + clientHeight));
-            }
-            progressBar.update(scrollHeight);
-            progressBar.stop();
-
-            // remove margin of each page and hide all initially
-            const pageCount = await page.evaluate(() => {
-                const pages = document.querySelectorAll("div.outer_page_container div[id^='outer_page_']");
-                pages.forEach(p => {
-                    p.style.margin = '0';
-                    p.style.display = 'none';
+    /**
+     * Group pages by their dimensions
+     */
+    async groupPagesByDimensions(pages) {
+        console.log(`Grouping pages by dimensions...`)
+        const groups = [];
+        if (pages.length === 0) {
+            return groups;
+        }
+        let ids = [pages[0].id];
+        ScribdDownloader.progressBar.start(pages.length, 1);
+        for (let i = 1; i < pages.length; i++) {
+            const prev = pages[i - 1];
+            const curr = pages[i];
+            if (curr.width === prev.width && curr.height === prev.height) {
+                ids.push(curr.id);
+            } else {
+                groups.push({
+                    ids: ids,
+                    width: prev.width,
+                    height: prev.height,
                 });
-                return pages.length;
-            });
-
-            // keep only the outer_page_container content
-            await page.evaluate(() => { // eslint-disable-next-line
-                document.body.innerHTML = document.querySelector("div.outer_page_container").innerHTML
-            })
-
-            // prepare pdf options
-            let options = {
-                printBackground: true,
-                timeout: 0
+                ids = [curr.id];
             }
-
-            // generate per-page pdfs
-            console.log(`Generate per-page PDFs...`)
-            progressBar.start(pageCount, 0);
-            for (let i = 0; i < pageCount; i++) {
-                // show current page
-                await page.evaluate((i) => {
-                    document.getElementById(`outer_page_${(i + 1)}`).style.display = 'block'
-                }, i)
-
-                // get page size and set options
-                let pageSelector = await page.$(`#outer_page_${(i + 1)}`);
-                let style = await pageSelector.evaluate((el) => el.getAttribute("style"))
-                options.path = `${output}/${identifier}/${String(i).padStart(5, '0')}.pdf`
-                options.height = parseInt(style.split("height:")[1].split("px")[0].trim())
-                if (options.height % 2 !== 0) {
-                    options.height += 1
-                }
-                options.width = parseInt(style.split("width:")[1].split("px")[0].trim())
-
-                // generate pdf
-                await directoryIo.create(path.dirname(options.path))
-                await page.pdf(options);
-
-                // hide current page
-                await page.evaluate((i) => {
-                    const el = document.getElementById(`outer_page_${(i + 1)}`);
-                    if (el) el.remove();
-                }, i)
-
-                progressBar.update(i + 1);
-            }
-            progressBar.update(100);
-            progressBar.stop();
-
-            // merge per-page pdfs
-            console.log(`Merging PDFs...`)
-            const outputPdf = await PDFDocument.create();
-            for (let i = 0; i < pageCount; i++) {
-                let tmpPdfPath = `${output}/${identifier}/${String(i).padStart(5, '0')}.pdf`
-                try {
-                    const pdfBytes = await fs.readFile(tmpPdfPath);
-                    const sourcePdf = await PDFDocument.load(pdfBytes);
-                    const copiedPages = await outputPdf.copyPages(sourcePdf, sourcePdf.getPageIndices());
-                    copiedPages.forEach(page => {
-                        outputPdf.addPage(page);
-                    });
-                } catch (error) {
-                    console.error(`Failed to merge PDF at ${tmpPdfPath}:`, error.message);
-                }
-            }
-            const outputPdfBytes = await outputPdf.save();
-            let outputPdfPath = `${output}/${identifier}.pdf`
-            await fs.writeFile(outputPdfPath, outputPdfBytes);
-            console.log(`Generated: ${outputPdfPath}`);
-
-            // remove temporary directory
-            try {
-                await fs.rm(`${output}/${identifier}`, { recursive: true, force: true });
-            } catch (error) {
-                console.error(`Failed to delete temporary directory at ${output}/${identifier}:`, error.message);
-            }
-
-            await page.close()
-            await puppeteerSg.close()
-        } else {
-            throw new Error(`Unsupported URL: ${url}`)
+            ScribdDownloader.progressBar.update(i + 1);
         }
+        ScribdDownloader.progressBar.update(pages.length);
+        ScribdDownloader.progressBar.stop();
+        groups.push({
+            ids: ids,
+            width: pages[pages.length - 1].width,
+            height: pages[pages.length - 1].height,
+        });
+        return groups;
     }
 
-    async embedsImage(url) {
-        let deviceScaleFactor = 2
-        const m = scribdRegex.EMBED.exec(url)
-        if (m) {
-            let id = m[1]
-
-            // prepare temp dir
-            let dir = `${output}/${id}`
-            await directoryIo.create(dir)
-
-            // navigate to scribd
-            let page = await puppeteerSg.getPage(url)
-
-            // wait rendering
-            await new Promise(resolve => setTimeout(resolve, 1000))
-
-            // get the title
-            let div = await page.$("div.mobile_overlay a")
-            let title = decodeURIComponent(await div.evaluate((el) => el.href.split('/').pop().trim()))
-
-            // hide blockers
-            let docScroller = await page.$("div.document_scroller")
-            await docScroller.evaluate((el) => {
-                el["style"]["bottom"] = "0px"
-                el["style"]["margin-top"] = "0px"
+    /**
+     * Generate PDFs for each group of pages with the same dimensions
+     */
+    async generatePDFs(page, groups, tempDir) {
+        console.log(`Generating PDFs for ${groups.length} groups of pages...`)
+        const pdfPaths = [];
+        await page.evaluate(() => {
+            window.__helpers__.hideSelectorAll("div[id^='outer_page_']");
+        });
+        ScribdDownloader.progressBar.start(groups.length, 0);
+        for (let i = 0; i < groups.length; i++) {
+            await page.evaluate((ids) => {
+                window.__helpers__.showSelectorAll(ids.map(id => `div#${id}`).join(','));
+            }, groups[i].ids);
+            const pdfPath = `${tempDir}/${(i + 1).toString().padStart(5, '0')}.pdf`;
+            await puppeteerSg.generatePDF(page, pdfPath, {
+                width: groups[i].width,
+                height: groups[i].height
             });
-            let docToolbarDrop = await page.$("div.toolbar_drop")
-            await docToolbarDrop.evaluate((el) => el["style"]["display"] = "none");
-
-            // download images
-            let docOuterPages = await page.$$("div.outer_page_container div[id^='outer_page_']")
-            let images = []
-            const bar = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
-            bar.start(docOuterPages.length, 0);
-            for (let i = 0; i < docOuterPages.length; i++) {
-                await page.evaluate((i) => { // eslint-disable-next-line
-                    document.getElementById(`outer_page_${(i + 1)}`).scrollIntoView()
-                }, i)
-
-                let width = 1191
-                let height = 1684
-                let style = await docOuterPages[i].evaluate((el) => el.getAttribute("style"));
-                if (style.includes("width:") && style.includes("height:")) {
-                    height = Math.ceil(width * parseInt(style.split("height:")[1].split("px")[0].trim()) / parseInt(style.split("width:")[1].split("px")[0].trim()))
-                }
-                await page.setViewport({ width: width, height: height, deviceScaleFactor: deviceScaleFactor });
-
-                let imagePath = `${dir}/${(i + 1).toString().padStart(5, 0)}.png`
-                await docOuterPages[i].screenshot({ path: imagePath });
-
-                let metadata = await sharp(imagePath).metadata()
-                images.push(new Image(
-                    imagePath,
-                    metadata.width,
-                    metadata.height
-                ))
-                bar.update(i + 1);
-            }
-            bar.stop();
-
-            // generate pdf
-            await pdfGenerator.generate(images, `${output}/${sanitize(filename == "title" ? title : id)}.pdf`)
-
-            // remove temp dir
-            directoryIo.remove(`${dir}`)
-
-            await page.close()
-            await puppeteerSg.close()
-        } else {
-            throw new Error(`Unsupported URL: ${url}`)
+            pdfPaths.push(pdfPath);
+            await page.evaluate((ids) => {
+                window.__helpers__.removeSelectorAll(ids.map(id => `div#${id}`).join(','));
+            }, groups[i].ids);
+            ScribdDownloader.progressBar.update(i + 1);
         }
+        ScribdDownloader.progressBar.update(groups.length);
+        ScribdDownloader.progressBar.stop();
+        return pdfPaths;
     }
+
 }
 
 export const scribdDownloader = new ScribdDownloader()
