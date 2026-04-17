@@ -3,7 +3,7 @@ import puppeteer from "puppeteer";
 import { directoryIo } from "../io/DirectoryIo.js";
 
 class PuppeteerSg {
-	static buffer = 1000;
+	static buffer = 1500;
 
 	constructor() {
 		if (!PuppeteerSg.instance) {
@@ -78,7 +78,7 @@ class PuppeteerSg {
 	async injectHelperFunctions(page) {
 		const browserHelpers = `
       window.__helpers__ = {
-        lazyLoad: async (selector = null, rendertime = 300) => {
+        lazyLoad: async (selector = null, rendertime = 1400) => {
   await new Promise(resolve => {
     const container = selector ? document.querySelector(selector) : null;
     if (selector && !container) {
